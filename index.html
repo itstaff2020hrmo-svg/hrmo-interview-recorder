@@ -37,11 +37,26 @@
 
     #status {
       margin: 18px auto;
-      max-width: 650px;
       line-height: 1.6;
-      overflow-wrap: anywhere;
     }
 
+    button {
+      border: 0;
+      border-radius: 8px;
+      padding: 15px 25px;
+      font-size: 18px;
+      font-weight: bold;
+      cursor: pointer;
+      background: #d62828;
+      color: white;
+    }
+
+    button:disabled {
+      background: #777;
+      cursor: not-allowed;
+    }
+
+    .hidden { display: none !important; }
     .recording { color: #ff7777; }
     .waiting { color: #ffd166; }
   </style>
@@ -55,26 +70,28 @@
   <video id="preview" autoplay muted playsinline></video>
 
   <div id="timer">02:00</div>
+
+  <button id="stopBtn" class="hidden" onclick="stopRecording()">
+    Stop Recording
+  </button>
+
   <p id="status">Requesting camera and microphone access...</p>
 </div>
 
 <script>
+  const params = new URLSearchParams(location.search);
+  const questionNumber = Number(params.get("q"));
+
   const MAX_SECONDS = Math.max(
     1,
-    Math.min(
-      120,
-      Number(new URLSearchParams(location.search).get("seconds")) || 120
-    )
-  );
-
-  const questionNumber = Number(
-    new URLSearchParams(location.search).get("q")
+    Math.min(120, Number(params.get("seconds")) || 120)
   );
 
   const preview = document.getElementById("preview");
   const timer = document.getElementById("timer");
   const statusText = document.getElementById("status");
   const questionTitle = document.getElementById("questionTitle");
+  const stopBtn = document.getElementById("stopBtn");
 
   let stream = null;
   let mediaRecorder = null;
@@ -82,10 +99,8 @@
   let startedAt = 0;
   let stopped = false;
   let waitingForAcknowledgment = false;
-  let fallbackTimer = null;
-
-  let remainingSeconds = MAX_SECONDS;
   let countdownHandle = null;
+  let fallbackTimer = null;
 
   function setStatus(message, className = "") {
     statusText.className = className;
@@ -93,12 +108,9 @@
   }
 
   function showTimer(seconds) {
-    const m = Math.floor(seconds / 60);
-    const s = seconds % 60;
-
     timer.textContent =
-      String(m).padStart(2, "0") + ":" +
-      String(s).padStart(2, "0");
+      String(Math.floor(seconds / 60)).padStart(2, "0") + ":" +
+      String(seconds % 60).padStart(2, "0");
   }
 
   function stopCamera() {
@@ -113,7 +125,7 @@
   async function startRecording() {
     if (!window.opener || window.opener.closed) {
       setStatus(
-        "The main interview page is not open. Return to the interview page and click Record Answer."
+        "Open this recorder from the main interview page using Record Answer."
       );
       return;
     }
@@ -121,19 +133,16 @@
     if (!Number.isInteger(questionNumber) ||
         questionNumber < 1 ||
         questionNumber > 6) {
-      setStatus("Invalid question number. Return to the interview page.");
+      setStatus("Invalid question number.");
       return;
     }
 
     questionTitle.textContent = "Question " + questionNumber;
-    showTimer(remainingSeconds);
+    showTimer(MAX_SECONDS);
 
-    if (!navigator.mediaDevices ||
-        !navigator.mediaDevices.getUserMedia ||
+    if (!navigator.mediaDevices?.getUserMedia ||
         !window.MediaRecorder) {
-      setStatus(
-        "Your browser does not support camera recording. Open this page in an updated Chrome browser using HTTPS."
-      );
+      setStatus("Please use an updated Chrome browser on HTTPS.");
       return;
     }
 
@@ -161,26 +170,27 @@
       mediaRecorder = new MediaRecorder(stream, options);
       chunks = [];
 
-      mediaRecorder.ondataavailable = function(event) {
+      mediaRecorder.ondataavailable = event => {
         if (event.data && event.data.size > 0) {
           chunks.push(event.data);
         }
       };
 
-      mediaRecorder.onerror = function() {
-        setStatus("A recording error occurred. Please return and try again.");
+      mediaRecorder.onerror = () => {
+        stopBtn.disabled = true;
+        setStatus("Recording error. Please return to the interview page.");
         stopCamera();
       };
 
-      mediaRecorder.onstop = function() {
+      mediaRecorder.onstop = () => {
         clearInterval(countdownHandle);
+        stopBtn.classList.add("hidden");
         stopCamera();
 
-        const mimeType = mediaRecorder.mimeType || "video/webm";
-        const blob = new Blob(chunks, { type: mimeType });
+        const blob = new Blob(chunks, { type: "video/webm" });
 
         if (!blob.size) {
-          setStatus("No video was recorded. Please return and try again.");
+          setStatus("No video was recorded. Please try again.");
           return;
         }
 
@@ -190,14 +200,21 @@
       mediaRecorder.start(1000);
       startedAt = Date.now();
 
-      setStatus("Recording in progress. Speak clearly into your microphone.", "recording");
+      stopBtn.classList.remove("hidden");
+      stopBtn.disabled = false;
 
-      countdownHandle = setInterval(function() {
+      setStatus(
+        "Recording in progress. Click Stop Recording when you finish.",
+        "recording"
+      );
+
+      countdownHandle = setInterval(() => {
         const elapsed = Math.floor((Date.now() - startedAt) / 1000);
-        remainingSeconds = Math.max(0, MAX_SECONDS - elapsed);
-        showTimer(remainingSeconds);
+        const remaining = Math.max(0, MAX_SECONDS - elapsed);
 
-        if (remainingSeconds <= 0) {
+        showTimer(remaining);
+
+        if (remaining <= 0) {
           stopRecording();
         }
       }, 250);
@@ -205,80 +222,65 @@
     } catch (error) {
       stopCamera();
 
-      let message = "Could not access the camera or microphone.";
-
-      if (error.name === "NotAllowedError" ||
-          error.name === "PermissionDeniedError") {
-        message =
-          "Camera or microphone permission was denied. Allow access in Chrome settings, then reopen the recorder.";
+      if (error.name === "NotAllowedError") {
+        setStatus(
+          "Camera or microphone permission was denied. Allow access in Chrome settings and reopen the recorder."
+        );
       } else if (error.name === "NotFoundError") {
-        message = "No camera or microphone was found on this device.";
-      } else if (error.name === "NotReadableError") {
-        message = "The camera may be in use by another application. Close that application and try again.";
+        setStatus("No camera or microphone was found.");
+      } else {
+        setStatus("Could not start recording: " + error.message);
       }
-
-      setStatus(message);
     }
   }
 
   function stopRecording() {
-    if (stopped) return;
-    stopped = true;
+    if (stopped || !mediaRecorder ||
+        mediaRecorder.state === "inactive") {
+      return;
+    }
 
+    stopped = true;
+    stopBtn.disabled = true;
     clearInterval(countdownHandle);
 
-    if (mediaRecorder &&
-        mediaRecorder.state !== "inactive") {
-      mediaRecorder.stop();
-      setStatus("Recording finished. Preparing your video...", "waiting");
-    } else {
-      stopCamera();
-    }
+    setStatus("Recording stopped. Preparing video...", "waiting");
+
+    mediaRecorder.stop();
   }
 
   function sendVideo(blob) {
     if (!window.opener || window.opener.closed) {
-      setStatus(
-        "The main interview page is no longer available. Keep this page open and contact the interviewer."
-      );
+      setStatus("The main interview page is no longer open.");
       return;
     }
 
-    const durationSeconds = Math.min(
-      MAX_SECONDS,
-      Math.max(0, Math.round((Date.now() - startedAt) / 1000))
-    );
-
     waitingForAcknowledgment = true;
 
-    setStatus(
-      "Recording complete. Sending your video to the main interview page...",
-      "waiting"
+    const durationSeconds = Math.min(
+      MAX_SECONDS,
+      Math.max(1, Math.round((Date.now() - startedAt) / 1000))
     );
 
-    window.opener.postMessage(
-      {
-        type: "HRMO_VIDEO_RECORDED",
-        questionNumber: questionNumber,
-        durationSeconds: durationSeconds,
-        blob: blob
-      },
-      "*"
-    );
+    setStatus("Sending the recorded video to the main page...", "waiting");
 
-    // If the main page does not acknowledge receipt, do not silently close.
-    fallbackTimer = setTimeout(function() {
+    window.opener.postMessage({
+      type: "HRMO_VIDEO_RECORDED",
+      questionNumber: questionNumber,
+      durationSeconds: durationSeconds,
+      blob: blob
+    }, "*");
+
+    fallbackTimer = setTimeout(() => {
       if (waitingForAcknowledgment) {
         setStatus(
-          "The main page has not confirmed receipt yet. Check the main interview page. If the video did not arrive, return to the interview and try again.",
-          "waiting"
+          "Waiting for the main page to receive your video. Check the main interview page."
         );
       }
     }, 15000);
   }
 
-  window.addEventListener("message", function(event) {
-    // Only accept acknowledgment from the window that opened this recorder.
+  window.addEventListener("message", event => {
     if (event.source !== window.opener) return;
 
     const data = event.data;
@@ -292,19 +294,13 @@
     waitingForAcknowledgment = false;
     clearTimeout(fallbackTimer);
 
-    setStatus(
-      "Video received by the main interview page. Returning now..."
-    );
+    setStatus("Video received. Returning to the interview page.");
 
     stopCamera();
 
-    // The parent has already received the Blob and can upload it.
-    setTimeout(function() {
-      window.close();
-    }, 300);
+    setTimeout(() => window.close(), 300);
   });
 
-  // Automatically request permission and start recording when opened.
   startRecording();
 </script>
 </body>
