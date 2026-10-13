@@ -4,142 +4,145 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>HRMO Answer Recorder</title>
+  <title>HRMO Interview Recorder</title>
+
   <style>
     body {
+      margin: 0;
+      padding: 20px;
       font-family: Arial, sans-serif;
-      background: #f1f5f9;
-      color: #1e293b;
-      max-width: 600px;
-      margin: 0 auto;
-      padding: 16px;
+      background: #101827;
+      color: white;
       text-align: center;
     }
-    .card {
-      background: white;
-      padding: 20px;
-      border-radius: 14px;
-      box-shadow: 0 4px 18px #0001;
+
+    .panel {
+      max-width: 800px;
+      margin: auto;
     }
+
     video {
       width: 100%;
-      background: #111;
-      border-radius: 10px;
-      margin-top: 12px;
+      max-height: 60vh;
+      background: black;
+      border-radius: 12px;
+      margin-top: 16px;
     }
-    button {
-      width: 100%;
-      padding: 14px;
-      margin-top: 12px;
-      border: 0;
-      border-radius: 9px;
-      font-size: 16px;
+
+    #timer {
+      font-size: 32px;
       font-weight: bold;
-      color: white;
-      background: #1769aa;
+      margin: 16px;
     }
-    .stop { background: #b42318; }
-    button:disabled { opacity: .5; }
-    #timer { font-size: 34px; font-weight: bold; margin: 12px; }
-    #status { line-height: 1.5; overflow-wrap: anywhere; }
+
+    #status {
+      margin: 18px auto;
+      max-width: 650px;
+      line-height: 1.6;
+      overflow-wrap: anywhere;
+    }
+
+    .recording { color: #ff7777; }
+    .waiting { color: #ffd166; }
   </style>
 </head>
+
 <body>
-<div class="card">
-  <h2>HRMO Video Interview</h2>
-  <h3 id="question">Preparing recorder...</h3>
+<div class="panel">
+  <h1>HRMO Video Interview</h1>
+  <h2 id="questionTitle">Preparing recorder...</h2>
+
   <video id="preview" autoplay muted playsinline></video>
+
   <div id="timer">02:00</div>
   <p id="status">Requesting camera and microphone access...</p>
-  <button id="stopBtn" class="stop" disabled>Stop and Save Answer</button>
 </div>
 
 <script>
-(() => {
-  "use strict";
+  const MAX_SECONDS = Math.max(
+    1,
+    Math.min(
+      120,
+      Number(new URLSearchParams(location.search).get("seconds")) || 120
+    )
+  );
 
-  const QUESTIONS = [
-    "Tell me about yourself.",
-    "Why do you want to work here?",
-    "What are your greatest strengths?",
-    "What is your biggest weakness?",
-    "Why should we hire you?",
-    "Where do you see yourself in five years?"
-  ];
+  const questionNumber = Number(
+    new URLSearchParams(location.search).get("q")
+  );
 
-  const LIMIT_SECONDS = 120;
-  const params = new URLSearchParams(location.search);
-  const questionNumber = Number(params.get("q") || "1");
-
-  const questionEl = document.getElementById("question");
   const preview = document.getElementById("preview");
-  const timerEl = document.getElementById("timer");
-  const statusEl = document.getElementById("status");
-  const stopBtn = document.getElementById("stopBtn");
+  const timer = document.getElementById("timer");
+  const statusText = document.getElementById("status");
+  const questionTitle = document.getElementById("questionTitle");
 
   let stream = null;
-  let recorder = null;
+  let mediaRecorder = null;
   let chunks = [];
   let startedAt = 0;
-  let timerInterval = null;
   let stopped = false;
+  let waitingForAcknowledgment = false;
+  let fallbackTimer = null;
 
-  function status(message) {
-    statusEl.textContent = message;
+  let remainingSeconds = MAX_SECONDS;
+  let countdownHandle = null;
+
+  function setStatus(message, className = "") {
+    statusText.className = className;
+    statusText.textContent = message;
   }
 
-  function formatTime(seconds) {
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return String(mins).padStart(2, "0") + ":" +
-      String(secs).padStart(2, "0");
+  function showTimer(seconds) {
+    const m = Math.floor(seconds / 60);
+    const s = seconds % 60;
+
+    timer.textContent =
+      String(m).padStart(2, "0") + ":" +
+      String(s).padStart(2, "0");
   }
 
-  function releaseCamera() {
+  function stopCamera() {
     if (stream) {
       stream.getTracks().forEach(track => track.stop());
       stream = null;
     }
+
     preview.srcObject = null;
   }
 
-  function fail(message) {
-    status(message);
-    stopBtn.disabled = true;
-    clearInterval(timerInterval);
-    releaseCamera();
-  }
+  async function startRecording() {
+    if (!window.opener || window.opener.closed) {
+      setStatus(
+        "The main interview page is not open. Return to the interview page and click Record Answer."
+      );
+      return;
+    }
 
-  async function start() {
     if (!Number.isInteger(questionNumber) ||
         questionNumber < 1 ||
-        questionNumber > QUESTIONS.length) {
-      fail("Invalid question. Return to the interview page and try again.");
+        questionNumber > 6) {
+      setStatus("Invalid question number. Return to the interview page.");
       return;
     }
 
-    questionEl.textContent =
-      "Question " + questionNumber + ": " + QUESTIONS[questionNumber - 1];
-
-    if (!window.opener) {
-      fail("This recorder must be opened from the HRMO interview page. Return to the interview and tap Answer again.");
-      return;
-    }
+    questionTitle.textContent = "Question " + questionNumber;
+    showTimer(remainingSeconds);
 
     if (!navigator.mediaDevices ||
         !navigator.mediaDevices.getUserMedia ||
         !window.MediaRecorder) {
-      fail("This browser does not support recording. Please update Chrome.");
+      setStatus(
+        "Your browser does not support camera recording. Open this page in an updated Chrome browser using HTTPS."
+      );
       return;
     }
 
     try {
-      // Camera and microphone access happens on GitHub Pages, not Apps Script.
       stream = await navigator.mediaDevices.getUserMedia({
         video: {
           facingMode: "user",
-          width: { ideal: 640 },
-          height: { ideal: 480 }
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
         },
         audio: true
       });
@@ -147,68 +150,74 @@
       preview.srcObject = stream;
       await preview.play();
 
-      const mimeTypes = [
-        "video/webm;codecs=vp8,opus",
-        "video/webm"
-      ];
-      const mimeType = mimeTypes.find(type =>
-        MediaRecorder.isTypeSupported(type)
-      );
+      let options = {};
 
-      if (!mimeType) {
-        fail("WebM video recording is not supported by this browser.");
-        return;
+      if (MediaRecorder.isTypeSupported("video/webm;codecs=vp8,opus")) {
+        options.mimeType = "video/webm;codecs=vp8,opus";
+      } else if (MediaRecorder.isTypeSupported("video/webm")) {
+        options.mimeType = "video/webm";
       }
 
-      recorder = new MediaRecorder(stream, {
-        mimeType: mimeType,
-        videoBitsPerSecond: 500000,
-        audioBitsPerSecond: 64000
-      });
-
+      mediaRecorder = new MediaRecorder(stream, options);
       chunks = [];
 
-      recorder.ondataavailable = event => {
+      mediaRecorder.ondataavailable = function(event) {
         if (event.data && event.data.size > 0) {
           chunks.push(event.data);
         }
       };
 
-      recorder.onerror = event => {
-        status("Recording error: " +
-          (event.error?.message || "unknown error"));
+      mediaRecorder.onerror = function() {
+        setStatus("A recording error occurred. Please return and try again.");
+        stopCamera();
       };
 
-      recorder.onstop = sendVideoToInterview;
+      mediaRecorder.onstop = function() {
+        clearInterval(countdownHandle);
+        stopCamera();
 
+        const mimeType = mediaRecorder.mimeType || "video/webm";
+        const blob = new Blob(chunks, { type: mimeType });
+
+        if (!blob.size) {
+          setStatus("No video was recorded. Please return and try again.");
+          return;
+        }
+
+        sendVideo(blob);
+      };
+
+      mediaRecorder.start(1000);
       startedAt = Date.now();
-      recorder.start(1000);
-      stopBtn.disabled = false;
-      status("Recording started. Keep this page open.");
 
-      updateTimer();
-      timerInterval = setInterval(updateTimer, 250);
+      setStatus("Recording in progress. Speak clearly into your microphone.", "recording");
+
+      countdownHandle = setInterval(function() {
+        const elapsed = Math.floor((Date.now() - startedAt) / 1000);
+        remainingSeconds = Math.max(0, MAX_SECONDS - elapsed);
+        showTimer(remainingSeconds);
+
+        if (remainingSeconds <= 0) {
+          stopRecording();
+        }
+      }, 250);
 
     } catch (error) {
-      console.error(error);
-      fail(
-        "Camera/microphone permission denied: " +
-        error.name + " — " + error.message +
-        ". Allow Camera and Microphone in Chrome and Huawei settings, then try again."
-      );
-    }
-  }
+      stopCamera();
 
-  function updateTimer() {
-    if (!startedAt || stopped) return;
+      let message = "Could not access the camera or microphone.";
 
-    const elapsed = Math.floor((Date.now() - startedAt) / 1000);
-    const remaining = Math.max(0, LIMIT_SECONDS - elapsed);
+      if (error.name === "NotAllowedError" ||
+          error.name === "PermissionDeniedError") {
+        message =
+          "Camera or microphone permission was denied. Allow access in Chrome settings, then reopen the recorder.";
+      } else if (error.name === "NotFoundError") {
+        message = "No camera or microphone was found on this device.";
+      } else if (error.name === "NotReadableError") {
+        message = "The camera may be in use by another application. Close that application and try again.";
+      }
 
-    timerEl.textContent = formatTime(remaining);
-
-    if (remaining <= 0) {
-      stopRecording();
+      setStatus(message);
     }
   }
 
@@ -216,58 +225,87 @@
     if (stopped) return;
     stopped = true;
 
-    clearInterval(timerInterval);
-    timerInterval = null;
-    stopBtn.disabled = true;
+    clearInterval(countdownHandle);
 
-    status("Recording stopped. Preparing your video...");
-
-    if (recorder && recorder.state !== "inactive") {
-      recorder.stop();
+    if (mediaRecorder &&
+        mediaRecorder.state !== "inactive") {
+      mediaRecorder.stop();
+      setStatus("Recording finished. Preparing your video...", "waiting");
     } else {
-      fail("No recording was created. Return to the interview and try again.");
+      stopCamera();
     }
   }
 
-  function sendVideoToInterview() {
-    const durationSeconds = Math.min(
-      LIMIT_SECONDS,
-      Math.max(1, Math.round((Date.now() - startedAt) / 1000))
-    );
-
-    const blob = new Blob(chunks, {
-      type: recorder.mimeType || "video/webm"
-    });
-
-    chunks = [];
-    releaseCamera();
-
-    if (!blob.size) {
-      fail("The video is empty. Please return to the interview and try again.");
+  function sendVideo(blob) {
+    if (!window.opener || window.opener.closed) {
+      setStatus(
+        "The main interview page is no longer available. Keep this page open and contact the interviewer."
+      );
       return;
     }
 
-    try {
-      window.opener.postMessage({
+    const durationSeconds = Math.min(
+      MAX_SECONDS,
+      Math.max(0, Math.round((Date.now() - startedAt) / 1000))
+    );
+
+    waitingForAcknowledgment = true;
+
+    setStatus(
+      "Recording complete. Sending your video to the main interview page...",
+      "waiting"
+    );
+
+    window.opener.postMessage(
+      {
         type: "HRMO_VIDEO_RECORDED",
         questionNumber: questionNumber,
         durationSeconds: durationSeconds,
         blob: blob
-      }, "*");
+      },
+      "*"
+    );
 
-      timerEl.textContent = "DONE";
-      status("Video captured. Return to the interview tab. Keep that tab open while the video uploads.");
-    } catch (error) {
-      console.error(error);
-      fail("Could not send the video to the interview page. Return and try again.");
-    }
+    // If the main page does not acknowledge receipt, do not silently close.
+    fallbackTimer = setTimeout(function() {
+      if (waitingForAcknowledgment) {
+        setStatus(
+          "The main page has not confirmed receipt yet. Check the main interview page. If the video did not arrive, return to the interview and try again.",
+          "waiting"
+        );
+      }
+    }, 15000);
   }
 
-  stopBtn.addEventListener("click", stopRecording);
-  window.addEventListener("pagehide", releaseCamera);
+  window.addEventListener("message", function(event) {
+    // Only accept acknowledgment from the window that opened this recorder.
+    if (event.source !== window.opener) return;
 
-  start();
-})();
+    const data = event.data;
+
+    if (!data ||
+        data.type !== "HRMO_VIDEO_RECEIVED" ||
+        Number(data.questionNumber) !== questionNumber) {
+      return;
+    }
+
+    waitingForAcknowledgment = false;
+    clearTimeout(fallbackTimer);
+
+    setStatus(
+      "Video received by the main interview page. Returning now..."
+    );
+
+    stopCamera();
+
+    // The parent has already received the Blob and can upload it.
+    setTimeout(function() {
+      window.close();
+    }, 300);
+  });
+
+  // Automatically request permission and start recording when opened.
+  startRecording();
 </script>
 </body>
 </html>
