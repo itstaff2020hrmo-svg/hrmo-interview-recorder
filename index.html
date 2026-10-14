@@ -1,307 +1,166 @@
-
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>HRMO Interview Recorder</title>
-
-  <style>
-    body {
-      margin: 0;
-      padding: 20px;
-      font-family: Arial, sans-serif;
-      background: #101827;
-      color: white;
-      text-align: center;
-    }
-
-    .panel {
-      max-width: 800px;
-      margin: auto;
-    }
-
-    video {
-      width: 100%;
-      max-height: 60vh;
-      background: black;
-      border-radius: 12px;
-      margin-top: 16px;
-    }
-
-    #timer {
-      font-size: 32px;
-      font-weight: bold;
-      margin: 16px;
-    }
-
-    #status {
-      margin: 18px auto;
-      line-height: 1.6;
-    }
-
-    button {
-      border: 0;
-      border-radius: 8px;
-      padding: 15px 25px;
-      font-size: 18px;
-      font-weight: bold;
-      cursor: pointer;
-      background: #d62828;
-      color: white;
-    }
-
-    button:disabled {
-      background: #777;
-      cursor: not-allowed;
-    }
-
-    .hidden { display: none !important; }
-    .recording { color: #ff7777; }
-    .waiting { color: #ffd166; }
-  </style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>HRMO Interview Recorder</title>
+<style>
+body{font-family:Arial,sans-serif;background:#f2f5f9;color:#172033;margin:0;padding:20px}
+main{max-width:700px;margin:auto;background:white;border-radius:12px;padding:24px;box-shadow:0 3px 15px #0001}
+h1{color:#123d70}button{border:0;border-radius:6px;padding:12px 18px;margin:8px 6px 0 0;background:#145da0;color:#fff;font-size:15px;cursor:pointer}
+button:disabled{background:#9aa5b1;cursor:not-allowed}#status{background:#f0f3f6;padding:12px;border-radius:6px;margin-top:16px;overflow-wrap:anywhere}
+video{width:100%;max-height:360px;background:#111;border-radius:8px;margin-top:12px}.warning{color:#9b1c1c;font-weight:bold}
+</style>
 </head>
-
 <body>
-<div class="panel">
-  <h1>HRMO Video Interview</h1>
-  <h2 id="questionTitle">Preparing recorder...</h2>
-
-  <video id="preview" autoplay muted playsinline></video>
-
-  <div id="timer">02:00</div>
-
-  <button id="stopBtn" class="hidden" onclick="stopRecording()">
-    Stop Recording
-  </button>
-
-  <p id="status">Requesting camera and microphone access...</p>
-</div>
-
+<main>
+<h1>HRMO Video Interview Recorder</h1>
+<p id="questionInfo">Preparing recorder…</p>
+<p class="warning">Keep this recorder window visible. If it stays hidden for 10 seconds, the interview will be terminated.</p>
+<video id="preview" autoplay muted playsinline></video>
+<p id="timer">Time remaining: --:--</p>
+<button id="startBtn">Start Recording</button>
+<button id="stopBtn" disabled>Stop Recording</button>
+<div id="status" role="status" aria-live="polite">Waiting to start.</div>
+</main>
 <script>
+(() => {
   const params = new URLSearchParams(location.search);
   const questionNumber = Number(params.get("q"));
+  const seconds = Math.min(120, Math.max(1, Number(params.get("seconds")) || 120));
+  const suppliedParentOrigin = params.get("parentOrigin") || "";
+  const allowedParentOrigins = ["https://script.google.com", "https://script.googleusercontent.com"];
+  const parentOrigin = allowedParentOrigins.includes(suppliedParentOrigin) ? suppliedParentOrigin : "";
+  const $ = id => document.getElementById(id);
+  let stream = null, recorder = null, chunks = [], startedAt = 0, timerId = null;
+  let remaining = seconds, hiddenTimer = null, ended = false, notified = false;
 
-  const MAX_SECONDS = Math.max(
-    1,
-    Math.min(120, Number(params.get("seconds")) || 120)
-  );
-
-  const preview = document.getElementById("preview");
-  const timer = document.getElementById("timer");
-  const statusText = document.getElementById("status");
-  const questionTitle = document.getElementById("questionTitle");
-  const stopBtn = document.getElementById("stopBtn");
-
-  let stream = null;
-  let mediaRecorder = null;
-  let chunks = [];
-  let startedAt = 0;
-  let stopped = false;
-  let waitingForAcknowledgment = false;
-  let countdownHandle = null;
-  let fallbackTimer = null;
-
-  function setStatus(message, className = "") {
-    statusText.className = className;
-    statusText.textContent = message;
+  $("questionInfo").textContent = "Question " + questionNumber + " — maximum " + seconds + " seconds";
+  if (!Number.isInteger(questionNumber) || questionNumber < 1 || questionNumber > 6) {
+    $("status").textContent = "Invalid question number. Close this window and return to the interview.";
+    $("startBtn").disabled = true;
   }
 
-  function showTimer(seconds) {
-    timer.textContent =
-      String(Math.floor(seconds / 60)).padStart(2, "0") + ":" +
-      String(seconds % 60).padStart(2, "0");
+  // Detect browser Back while recorder is active. Browsers may handle navigation differently.
+  history.pushState({hrmoRecorder: true}, "", location.href);
+  window.addEventListener("popstate", () => {
+    terminate("Browser Back button used in recorder window");
+    history.pushState({hrmoRecorder: true}, "", location.href);
+  });
+
+  function sendTermination(reason) {
+    if (notified) return;
+    notified = true;
+    try {
+      if (parentOrigin && window.opener && !window.opener.closed) {
+        window.opener.postMessage({type:"HRMO_INTERVIEW_TERMINATE", reason}, parentOrigin);
+      }
+    } catch (_) {}
+    $("status").textContent = "Interview terminated: " + reason + ". You may close this window.";
+    $("startBtn").disabled = true; $("stopBtn").disabled = true;
   }
 
-  function stopCamera() {
-    if (stream) {
-      stream.getTracks().forEach(track => track.stop());
-      stream = null;
+  function terminate(reason) {
+    if (ended) return;
+    ended = true;
+    clearInterval(timerId);
+    clearTimeout(hiddenTimer);
+    try { if (recorder && recorder.state !== "inactive") recorder.stop(); } catch (_) {}
+    try { if (stream) stream.getTracks().forEach(track => track.stop()); } catch (_) {}
+    sendTermination(reason);
+  }
+
+  // A hidden event can mean minimized, another tab, or a browser/app visibility change.
+  // Use a 10-second grace period to reduce accidental triggers.
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden" && !ended) {
+      clearTimeout(hiddenTimer);
+      hiddenTimer = setTimeout(() => {
+        if (document.visibilityState === "hidden") terminate("Recorder stayed hidden for 10 seconds");
+      }, 10000);
+    } else {
+      clearTimeout(hiddenTimer);
+      hiddenTimer = null;
     }
+  });
 
-    preview.srcObject = null;
-  }
+  window.addEventListener("message", event => {
+    if (!parentOrigin || event.origin !== parentOrigin) return;
+    if (!event.data || event.data.type !== "HRMO_VIDEO_RECEIVED") return;
+    if (stream) stream.getTracks().forEach(track => track.stop());
+    $("status").textContent = "Recording received. Returning to the interview…";
+    setTimeout(() => window.close(), 250);
+  });
 
   async function startRecording() {
-    if (!window.opener || window.opener.closed) {
-      setStatus(
-        "Open this recorder from the main interview page using Record Answer."
-      );
+    if (ended || recorder) return;
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.MediaRecorder) {
+      $("status").textContent = "This browser does not support camera/microphone recording. Try a current version of Chrome or Edge.";
       return;
     }
-
-    if (!Number.isInteger(questionNumber) ||
-        questionNumber < 1 ||
-        questionNumber > 6) {
-      setStatus("Invalid question number.");
-      return;
-    }
-
-    questionTitle.textContent = "Question " + questionNumber;
-    showTimer(MAX_SECONDS);
-
-    if (!navigator.mediaDevices?.getUserMedia ||
-        !window.MediaRecorder) {
-      setStatus("Please use an updated Chrome browser on HTTPS.");
-      return;
-    }
-
+    $("startBtn").disabled = true;
+    $("status").textContent = "Requesting camera and microphone permission…";
     try {
-      stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: "user",
-          width: { ideal: 1280 },
-          height: { ideal: 720 }
-        },
-        audio: true
-      });
-
-      preview.srcObject = stream;
-      await preview.play();
-
-      let options = {};
-
-      if (MediaRecorder.isTypeSupported("video/webm;codecs=vp8,opus")) {
-        options.mimeType = "video/webm;codecs=vp8,opus";
-      } else if (MediaRecorder.isTypeSupported("video/webm")) {
-        options.mimeType = "video/webm";
-      }
-
-      mediaRecorder = new MediaRecorder(stream, options);
+      stream = await navigator.mediaDevices.getUserMedia({video:true, audio:true});
+      $("preview").srcObject = stream;
+      const options = MediaRecorder.isTypeSupported("video/webm;codecs=vp9,opus")
+        ? {mimeType:"video/webm;codecs=vp9,opus"}
+        : (MediaRecorder.isTypeSupported("video/webm;codecs=vp8,opus") ? {mimeType:"video/webm;codecs=vp8,opus"} : {});
+      recorder = new MediaRecorder(stream, options);
       chunks = [];
-
-      mediaRecorder.ondataavailable = event => {
-        if (event.data && event.data.size > 0) {
-          chunks.push(event.data);
+      recorder.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+      recorder.onerror = () => terminate("Recording error");
+      recorder.onstop = () => {
+        if (ended) return;
+        clearInterval(timerId);
+        const blob = new Blob(chunks, {type:"video/webm"});
+        const durationSeconds = Math.min(seconds, Math.max(0, Math.round((Date.now()-startedAt)/1000)));
+        if (!blob.size) { $("status").textContent = "No video data was captured. Contact HRMO."; return; }
+        $("status").textContent = "Recording complete. Sending video to the interview page…";
+        try {
+          if (!window.opener || window.opener.closed) throw new Error("Interview page is no longer open.");
+          if (!parentOrigin) throw new Error("The interview page origin could not be verified. Close this window and reopen the recorder from the interview page.");
+          window.opener.postMessage({
+            type:"HRMO_VIDEO_RECORDED", questionNumber, durationSeconds, blob
+          }, parentOrigin);
+        } catch (e) {
+          $("status").textContent = "Could not send video to interview page: " + e.message;
         }
       };
-
-      mediaRecorder.onerror = () => {
-        stopBtn.disabled = true;
-        setStatus("Recording error. Please return to the interview page.");
-        stopCamera();
-      };
-
-      mediaRecorder.onstop = () => {
-        clearInterval(countdownHandle);
-        stopBtn.classList.add("hidden");
-        stopCamera();
-
-        const blob = new Blob(chunks, { type: "video/webm" });
-
-        if (!blob.size) {
-          setStatus("No video was recorded. Please try again.");
-          return;
-        }
-
-        sendVideo(blob);
-      };
-
-      mediaRecorder.start(1000);
-      startedAt = Date.now();
-
-      stopBtn.classList.remove("hidden");
-      stopBtn.disabled = false;
-
-      setStatus(
-        "Recording in progress. Click Stop Recording when you finish.",
-        "recording"
-      );
-
-      countdownHandle = setInterval(() => {
-        const elapsed = Math.floor((Date.now() - startedAt) / 1000);
-        const remaining = Math.max(0, MAX_SECONDS - elapsed);
-
-        showTimer(remaining);
-
-        if (remaining <= 0) {
-          stopRecording();
-        }
-      }, 250);
-
+      startedAt = Date.now(); remaining = seconds;
+      recorder.start(1000);
+      $("stopBtn").disabled = false;
+      $("status").textContent = "Recording in progress. Keep this window visible.";
+      updateTimer();
+      timerId = setInterval(() => {
+        remaining--;
+        updateTimer();
+        if (remaining <= 0) stopRecording();
+      }, 1000);
     } catch (error) {
-      stopCamera();
-
-      if (error.name === "NotAllowedError") {
-        setStatus(
-          "Camera or microphone permission was denied. Allow access in Chrome settings and reopen the recorder."
-        );
-      } else if (error.name === "NotFoundError") {
-        setStatus("No camera or microphone was found.");
-      } else {
-        setStatus("Could not start recording: " + error.message);
-      }
+      $("status").textContent = "Camera/microphone access failed: " + (error.message || error);
+      $("startBtn").disabled = false;
+      if (stream) stream.getTracks().forEach(track => track.stop());
     }
+  }
+
+  function updateTimer() {
+    const m = Math.floor(Math.max(0, remaining)/60);
+    const s = Math.max(0, remaining)%60;
+    $("timer").textContent = "Time remaining: " + String(m).padStart(2,"0") + ":" + String(s).padStart(2,"0");
   }
 
   function stopRecording() {
-    if (stopped || !mediaRecorder ||
-        mediaRecorder.state === "inactive") {
-      return;
-    }
-
-    stopped = true;
-    stopBtn.disabled = true;
-    clearInterval(countdownHandle);
-
-    setStatus("Recording stopped. Preparing video...", "waiting");
-
-    mediaRecorder.stop();
+    if (!recorder || recorder.state === "inactive" || ended) return;
+    $("stopBtn").disabled = true;
+    clearInterval(timerId);
+    recorder.stop();
+    if (stream) stream.getTracks().forEach(track => track.stop());
   }
 
-  function sendVideo(blob) {
-    if (!window.opener || window.opener.closed) {
-      setStatus("The main interview page is no longer open.");
-      return;
-    }
-
-    waitingForAcknowledgment = true;
-
-    const durationSeconds = Math.min(
-      MAX_SECONDS,
-      Math.max(1, Math.round((Date.now() - startedAt) / 1000))
-    );
-
-    setStatus("Sending the recorded video to the main page...", "waiting");
-
-    window.opener.postMessage({
-      type: "HRMO_VIDEO_RECORDED",
-      questionNumber: questionNumber,
-      durationSeconds: durationSeconds,
-      blob: blob
-    }, "*");
-
-    fallbackTimer = setTimeout(() => {
-      if (waitingForAcknowledgment) {
-        setStatus(
-          "Waiting for the main page to receive your video. Check the main interview page."
-        );
-      }
-    }, 15000);
-  }
-
-  window.addEventListener("message", event => {
-    if (event.source !== window.opener) return;
-
-    const data = event.data;
-
-    if (!data ||
-        data.type !== "HRMO_VIDEO_RECEIVED" ||
-        Number(data.questionNumber) !== questionNumber) {
-      return;
-    }
-
-    waitingForAcknowledgment = false;
-    clearTimeout(fallbackTimer);
-
-    setStatus("Video received. Returning to the interview page.");
-
-    stopCamera();
-
-    setTimeout(() => window.close(), 300);
-  });
-
-  startRecording();
+  $("startBtn").addEventListener("click", startRecording);
+  $("stopBtn").addEventListener("click", stopRecording);
+})();
 </script>
 </body>
 </html>
