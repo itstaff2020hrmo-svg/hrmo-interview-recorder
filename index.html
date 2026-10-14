@@ -7,9 +7,7 @@
 <title>HRMO Interview Recorder</title>
 
 <style>
-* {
-  box-sizing: border-box;
-}
+* { box-sizing: border-box; }
 
 body {
   font-family: Arial, sans-serif;
@@ -28,10 +26,7 @@ main {
   box-shadow: 0 3px 15px #0001;
 }
 
-h1 {
-  color: #123d70;
-  font-size: 25px;
-}
+h1 { color: #123d70; }
 
 button {
   border: 0;
@@ -39,7 +34,7 @@ button {
   padding: 12px 18px;
   margin: 8px 6px 0 0;
   background: #145da0;
-  color: #fff;
+  color: white;
   font-size: 15px;
   cursor: pointer;
 }
@@ -107,7 +102,7 @@ video {
   <button id="stopBtn" type="button" disabled>Stop Recording</button>
 
   <div id="status" role="status" aria-live="polite">
-    Ready. Click Start Recording when instructed.
+    Initializing recorder...
   </div>
 </main>
 
@@ -116,30 +111,11 @@ video {
   "use strict";
 
   const params = new URLSearchParams(window.location.search);
-
   const questionNumber = Number(params.get("q"));
-  const requestedSeconds = Number(params.get("seconds")) || 120;
-  const seconds = Math.min(180, Math.max(1, requestedSeconds));
-
-  const allowedParentOrigins = [
-    "https://script.google.com",
-    "https://script.googleusercontent.com"
-  ];
-
-  // Prefer the origin supplied by the main interview page.
-  let suppliedParentOrigin = params.get("parentOrigin") || "";
-
-  // If the parameter is missing, attempt to identify the opener's origin
-  // from the referrer. This is a fallback, not a guaranteed browser feature.
-  if (!suppliedParentOrigin && document.referrer) {
-    try {
-      suppliedParentOrigin = new URL(document.referrer).origin;
-    } catch (_) {}
-  }
-
-  const parentOrigin = allowedParentOrigins.includes(suppliedParentOrigin)
-    ? suppliedParentOrigin
-    : "";
+  const seconds = Math.min(
+    180,
+    Math.max(1, Number(params.get("seconds")) || 120)
+  );
 
   const $ = id => document.getElementById(id);
 
@@ -158,10 +134,32 @@ video {
   let uploadAcknowledged = false;
   let stopRequested = false;
 
+  // Determine the parent origin passed by the main interview page.
+  const suppliedParentOrigin = params.get("parentOrigin") || "";
+
+  function isAllowedParentOrigin(value) {
+    try {
+      const url = new URL(value);
+      const host = url.hostname.toLowerCase();
+
+      return url.protocol === "https:" &&
+        (
+          host === "script.google.com" ||
+          host === "script.googleusercontent.com" ||
+          host.endsWith(".script.googleusercontent.com")
+        );
+    } catch (_) {
+      return false;
+    }
+  }
+
+  const parentOrigin = isAllowedParentOrigin(suppliedParentOrigin)
+    ? new URL(suppliedParentOrigin).origin
+    : "";
+
   $("questionInfo").textContent =
     "Question " + questionNumber + " — maximum " + seconds + " seconds";
 
-  // Only an invalid question disables the Start button on initialization.
   if (
     !Number.isInteger(questionNumber) ||
     questionNumber < 1 ||
@@ -170,12 +168,18 @@ video {
     $("status").textContent =
       "Invalid question number. Return to the main interview page and reopen the recorder.";
     $("startBtn").disabled = true;
+    $("stopBtn").disabled = true;
     return;
   }
 
+  // Do not permanently disable Start during initialization just because
+  // verification failed. Show the exact issue and retry verification on click.
   if (!parentOrigin) {
     $("status").textContent =
-      "Recorder is ready, but the main interview page could not be verified. Reopen this recorder from the official HRMO interview page before recording.";
+      "The main interview page origin is missing or not approved. Reopen the recorder from the official interview page. If this continues, check the parentOrigin parameter.";
+  } else {
+    $("status").textContent =
+      "Recorder ready. Click Start Recording when instructed.";
   }
 
   function sendToParent(message) {
@@ -203,9 +207,7 @@ video {
     try {
       if (stream) {
         stream.getTracks().forEach(track => {
-          try {
-            track.stop();
-          } catch (_) {}
+          try { track.stop(); } catch (_) {}
         });
       }
     } catch (_) {}
@@ -239,21 +241,14 @@ video {
   }
 
   function terminate(reason) {
-    if (ended || uploadAcknowledged) return;
-
-    // Do not terminate an interview just because the recorder was opened.
-    // These checks apply once a recording has actually started.
-    if (!recordingHasStarted) return;
+    if (ended || uploadAcknowledged || !recordingHasStarted) return;
 
     ended = true;
     recordingActive = false;
 
     clearTimers();
-
-    // Notify the main page immediately where browser messaging permits.
     sendTermination(reason);
 
-    // Stop recording and disable callbacks that could submit a partial video.
     try {
       if (recorder && recorder.state !== "inactive") {
         recorder.ondataavailable = null;
@@ -267,7 +262,7 @@ video {
     disableButtons();
   }
 
-  // Browser Back handling.
+  // Detect browser Back during an active interview recording.
   try {
     history.pushState({ hrmoRecorder: true }, "", location.href);
 
@@ -275,7 +270,7 @@ video {
       if (recordingActive) {
         terminate("Browser Back button used during recording");
       } else if (recordingHasStarted && !uploadAcknowledged && !ended) {
-        terminate("Browser Back button used before the recording was submitted");
+        terminate("Browser Back button used before video submission");
       }
 
       try {
@@ -284,21 +279,19 @@ video {
     });
   } catch (_) {}
 
-  // Detect attempts to navigate away or close the recorder during recording.
   window.addEventListener("pagehide", () => {
     if (recordingActive) {
-      terminate("Recorder page was exited during recording");
+      terminate("Recorder page exited during recording");
     }
   });
 
   window.addEventListener("beforeunload", () => {
     if (recordingActive) {
-      terminate("Recorder window was closed during recording");
+      terminate("Recorder window closed during recording");
     }
   });
 
-  // Minimize, tab switching, and many app-switch scenarios.
-  // Terminate only after the page remains hidden for 10 seconds.
+  // Terminate if the recorder remains hidden for 10 seconds.
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "hidden" && recordingActive && !ended) {
       if (hiddenTimer !== null) clearTimeout(hiddenTimer);
@@ -318,7 +311,7 @@ video {
     }
   });
 
-  // The main page sends this only after it receives the recording.
+  // Receive acknowledgment after the main page receives the video.
   window.addEventListener("message", event => {
     if (!parentOrigin || event.origin !== parentOrigin) return;
     if (!event.data || typeof event.data !== "object") return;
@@ -335,9 +328,7 @@ video {
         "Recording received. Returning to the interview page...";
 
       setTimeout(() => {
-        try {
-          window.close();
-        } catch (_) {}
+        try { window.close(); } catch (_) {}
       }, 400);
     }
   });
@@ -345,10 +336,16 @@ video {
   async function startRecording() {
     if (ended || recordingHasStarted || recorder) return;
 
-    // A valid opener is necessary to send the video and termination notices.
-    if (!parentOrigin || !window.opener || window.opener.closed) {
+    // Require an approved parent and a live opener before recording.
+    if (!parentOrigin) {
       $("status").textContent =
-        "Cannot start: the main interview page is not verified or is closed. Close this window and open the recorder using the recording button on the main HRMO interview page.";
+        "Cannot start: the parentOrigin parameter is missing or invalid. Return to the main interview page and reopen the recorder.";
+      return;
+    }
+
+    if (!window.opener || window.opener.closed) {
+      $("status").textContent =
+        "Cannot start: the main interview page is closed. Reopen the recorder from the main interview page.";
       return;
     }
 
@@ -364,7 +361,7 @@ video {
       !window.MediaRecorder
     ) {
       $("status").textContent =
-        "This browser does not support camera/microphone recording. Use a current version of Chrome or Edge.";
+        "Camera/microphone recording is not supported. Use an updated version of Chrome or Edge.";
       return;
     }
 
@@ -378,7 +375,6 @@ video {
         audio: true
       });
 
-      // Permission dialogs can leave the recorder hidden.
       if (document.visibilityState === "hidden" || ended) {
         newStream.getTracks().forEach(track => track.stop());
 
@@ -421,8 +417,9 @@ video {
 
         recordingActive = false;
 
-        const mimeType = recorder.mimeType || "video/webm";
-        const blob = new Blob(chunks, { type: mimeType });
+        const blob = new Blob(chunks, {
+          type: recorder.mimeType || "video/webm"
+        });
 
         const durationSeconds = Math.min(
           seconds,
@@ -440,7 +437,7 @@ video {
         }
 
         $("status").textContent =
-          "Recording complete. Sending video to the main interview page. Please wait...";
+          "Recording complete. Sending video to the main interview page...";
 
         const sent = sendToParent({
           type: "HRMO_VIDEO_RECORDED",
@@ -451,7 +448,7 @@ video {
 
         if (!sent) {
           $("status").textContent =
-            "Unable to contact the main interview page. Keep this window open and contact HRMO.";
+            "Could not contact the main interview page. Keep this window open and contact HRMO.";
         }
       };
 
@@ -468,7 +465,6 @@ video {
         questionNumber: questionNumber
       });
 
-      // Enable Stop only after MediaRecorder starts successfully.
       $("startBtn").disabled = true;
       $("stopBtn").disabled = false;
 
@@ -483,9 +479,7 @@ video {
         remaining--;
         updateTimer();
 
-        if (remaining <= 0) {
-          stopRecording();
-        }
+        if (remaining <= 0) stopRecording();
       }, 1000);
 
     } catch (error) {
@@ -520,9 +514,7 @@ video {
       ended ||
       !recordingActive ||
       stopRequested
-    ) {
-      return;
-    }
+    ) return;
 
     stopRequested = true;
     recordingActive = false;
@@ -543,7 +535,6 @@ video {
 
   $("startBtn").addEventListener("click", startRecording);
   $("stopBtn").addEventListener("click", stopRecording);
-
 })();
 </script>
 </body>
