@@ -12,27 +12,27 @@
     body {
       margin: 0;
       padding: 20px;
+      background: #eef2f7;
+      color: #1f2937;
       font-family: Arial, sans-serif;
-      background: #f1f5f9;
-      color: #172033;
     }
 
     .container {
       max-width: 900px;
       margin: 0 auto;
       padding: 24px;
-      background: white;
-      border-radius: 14px;
-      box-shadow: 0 4px 18px #00000015;
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 4px 18px #0002;
     }
 
     h1 { color: #123c69; }
 
     video {
       width: 100%;
-      max-height: 460px;
-      background: #111827;
-      border-radius: 10px;
+      max-height: 480px;
+      background: #111;
+      border-radius: 8px;
       margin-top: 12px;
     }
 
@@ -47,21 +47,21 @@
     }
 
     button:disabled {
-      opacity: .45;
+      opacity: .5;
       cursor: not-allowed;
     }
 
     #startBtn { background: #15803d; color: white; }
     #stopBtn { background: #b91c1c; color: white; }
-    #status { font-weight: bold; margin-top: 16px; }
     #timer { font-size: 28px; font-weight: bold; }
+    #status { font-weight: bold; }
     #notice {
       display: none;
-      padding: 14px;
       margin-top: 16px;
-      border-radius: 8px;
+      padding: 14px;
       background: #fee2e2;
       color: #991b1b;
+      border-radius: 8px;
     }
   </style>
 </head>
@@ -70,7 +70,7 @@
 <div class="container">
   <h1>HRMO Asynchronous Video Interview</h1>
 
-  <p id="questionLabel">Preparing interview...</p>
+  <p id="questionLabel">Verifying interview...</p>
   <p>Time remaining: <span id="timer">02:00</span></p>
 
   <video id="preview" autoplay muted playsinline></video>
@@ -80,50 +80,97 @@
     <button id="stopBtn" disabled>Stop and Submit Answer</button>
   </div>
 
-  <p id="status">Verifying official interview page...</p>
+  <p id="status">Checking interview details...</p>
   <div id="notice" role="alert"></div>
 </div>
 
 <script>
 "use strict";
 
-/*
- * HRMO recorder configuration.
- * The parentOrigin must be supplied by the official interview page.
- */
+/* -------------------------------------------------------
+   CONFIGURATION
+------------------------------------------------------- */
+
 const RECORDER_ORIGIN = window.location.origin;
 const params = new URLSearchParams(window.location.search);
 
-const interviewId = params.get("interviewId") || "";
-const questionNumber = Number(params.get("q") || "1");
-const requestedSeconds = Number(params.get("seconds") || "120");
-const suppliedParentOrigin = params.get("parentOrigin") || "";
+const rawQuestion = (params.get("q") || "").trim();
+const rawSeconds = (params.get("seconds") || "").trim();
+
+const interviewId = (params.get("interviewId") || "").trim();
+const rawParentOrigin = (params.get("parentOrigin") || "").trim();
+
+let questionNumber = 0;
+let recordingSeconds = 120;
+let parentOrigin = "";
+
+let mediaStream = null;
+let mediaRecorder = null;
+let recordedChunks = [];
+
+let recording = false;
+let completed = false;
+let terminated = false;
+let recordingStartedAt = 0;
+
+let timerHandle = null;
+let hiddenHandle = null;
+let remainingSeconds = 120;
+
+/* -------------------------------------------------------
+   ELEMENTS
+------------------------------------------------------- */
 
 const preview = document.getElementById("preview");
 const startBtn = document.getElementById("startBtn");
 const stopBtn = document.getElementById("stopBtn");
-const statusText = document.getElementById("status");
 const timerText = document.getElementById("timer");
 const questionLabel = document.getElementById("questionLabel");
+const statusText = document.getElementById("status");
 const notice = document.getElementById("notice");
 
-let parentOrigin = "";
-let mediaStream = null;
-let mediaRecorder = null;
-let recordedChunks = [];
-let recordingStartedAt = 0;
-let timerHandle = null;
-let visibilityHandle = null;
-let remainingSeconds = Math.max(1, Math.min(requestedSeconds, 120));
-let recording = false;
-let completed = false;
-let terminated = false;
-let pageInitialized = false;
+/* -------------------------------------------------------
+   DISPLAY HELPERS
+------------------------------------------------------- */
 
-/*
- * This validates the URL format, not the identity of the parent.
- * The main page must separately validate messages from this recorder.
- */
+function showNotice(message) {
+  notice.textContent = message;
+  notice.style.display = "block";
+}
+
+function formatTime(seconds) {
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+
+  return String(m).padStart(2, "0") + ":" +
+         String(s).padStart(2, "0");
+}
+
+function clearTimers() {
+  if (timerHandle !== null) {
+    clearInterval(timerHandle);
+    timerHandle = null;
+  }
+
+  if (hiddenHandle !== null) {
+    clearTimeout(hiddenHandle);
+    hiddenHandle = null;
+  }
+}
+
+function stopCamera() {
+  if (mediaStream) {
+    mediaStream.getTracks().forEach(track => track.stop());
+    mediaStream = null;
+  }
+
+  preview.srcObject = null;
+}
+
+/* -------------------------------------------------------
+   VALIDATE PARAMETERS
+------------------------------------------------------- */
+
 function validateParentOrigin(value) {
   try {
     if (!value) return "";
@@ -139,56 +186,68 @@ function validateParentOrigin(value) {
   }
 }
 
+function validateConfiguration() {
+  if (!interviewId) {
+    return "The interview ID is missing. Reopen the recorder from the official interview page.";
+  }
+
+  if (!/^[1-6]$/.test(rawQuestion)) {
+    return "Invalid question number. The official page must pass a question number from 1 to 6.";
+  }
+
+  questionNumber = Number(rawQuestion);
+
+  if (!Number.isFinite(Number(rawSeconds)) ||
+      Number(rawSeconds) <= 0) {
+    return "The recording duration is missing or invalid.";
+  }
+
+  recordingSeconds = Math.min(120, Math.floor(Number(rawSeconds)));
+
+  if (recordingSeconds < 1) {
+    return "The recording duration must be at least one second.";
+  }
+
+  parentOrigin = validateParentOrigin(rawParentOrigin);
+
+  if (!parentOrigin) {
+    return "The parentOrigin parameter is missing or invalid. Reopen the recorder from the official HRMO interview page.";
+  }
+
+  if (!window.opener || window.opener.closed) {
+    return "The official interview page could not be detected. Reopen the recorder from the official page.";
+  }
+
+  return "";
+}
+
+/* -------------------------------------------------------
+   MESSAGES TO OFFICIAL INTERVIEW PAGE
+------------------------------------------------------- */
+
 function sendToParent(type, details = {}) {
-  if (!window.opener || window.opener.closed || !parentOrigin) return;
+  if (!parentOrigin || !window.opener || window.opener.closed) {
+    return;
+  }
 
   window.opener.postMessage({
-    type,
-    interviewId,
-    questionNumber,
+    type: type,
+    interviewId: interviewId,
+    questionNumber: questionNumber,
     ...details
   }, parentOrigin);
 }
 
-function showNotice(message) {
-  notice.textContent = message;
-  notice.style.display = "block";
-}
-
-function formatTime(totalSeconds) {
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-
-  return String(minutes).padStart(2, "0") + ":" +
-         String(seconds).padStart(2, "0");
-}
-
-function stopCamera() {
-  if (mediaStream) {
-    mediaStream.getTracks().forEach(track => track.stop());
-    mediaStream = null;
-  }
-
-  preview.srcObject = null;
-}
-
-function clearTimers() {
-  if (timerHandle) {
-    clearInterval(timerHandle);
-    timerHandle = null;
-  }
-
-  if (visibilityHandle) {
-    clearTimeout(visibilityHandle);
-    visibilityHandle = null;
-  }
-}
+/* -------------------------------------------------------
+   TERMINATE INTERVIEW
+------------------------------------------------------- */
 
 function terminateInterview(reason) {
   if (terminated || completed) return;
 
   terminated = true;
   recording = false;
+
   clearTimers();
 
   try {
@@ -199,7 +258,7 @@ function terminateInterview(reason) {
       mediaRecorder.stop();
     }
   } catch (error) {
-    // Continue with termination even if recording cannot be stopped cleanly.
+    // Continue closing the camera.
   }
 
   stopCamera();
@@ -208,93 +267,24 @@ function terminateInterview(reason) {
   stopBtn.disabled = true;
 
   statusText.textContent = "Interview terminated.";
+
   showNotice(
-    "THE INTERVIEW WAS TERMINATED BECAUSE YOU LEFT, HID, " +
-    "OR NAVIGATED AWAY FROM THE RECORDING WINDOW. " +
-    "Please return to the official HRMO interview page."
+    "THE INTERVIEW WAS TERMINATED BECAUSE YOU LEFT, " +
+    "HID, OR NAVIGATED AWAY FROM THE RECORDING WINDOW. " +
+    "Return to the official HRMO interview page."
   );
 
   sendToParent("HRMO_INTERVIEW_TERMINATE", {
-    reason: reason || "Recording window was hidden or exited."
+    reason: reason
   });
 }
 
-async function initializeRecorder() {
-  if (!interviewId) {
-    showNotice("The interview ID is missing. Reopen the recorder from the official interview page.");
-    statusText.textContent = "Verification failed.";
-    return;
-  }
+/* -------------------------------------------------------
+   START RECORDING
+------------------------------------------------------- */
 
-  if (!Number.isInteger(questionNumber) ||
-      questionNumber < 1 ||
-      questionNumber > 6) {
-    showNotice("Invalid question number. Reopen the official interview page.");
-    statusText.textContent = "Verification failed.";
-    return;
-  }
-
-  parentOrigin = validateParentOrigin(suppliedParentOrigin);
-
-  if (!parentOrigin) {
-    showNotice(
-      "The parentOrigin parameter is missing or invalid. " +
-      "Close this window and reopen the recorder from the official HRMO interview page."
-    );
-    statusText.textContent = "Verification failed.";
-    return;
-  }
-
-  if (!window.opener || window.opener.closed) {
-    showNotice("The official interview page could not be detected. Close this window and reopen the recorder from the official page.");
-    statusText.textContent = "Verification failed.";
-    return;
-  }
-
-  /*
-   * Notify the parent. The parent must check both event.origin
-   * and event.source before accepting recorder messages.
-   */
-  sendToParent("HRMO_RECORDER_READY", {
-    recorderOrigin: RECORDER_ORIGIN
-  });
-
-  questionLabel.textContent =
-    "Question " + questionNumber + " of 6";
-
-  statusText.textContent =
-    "Verified. Allow camera and microphone access to continue.";
-
-  try {
-    mediaStream = await navigator.mediaDevices.getUserMedia({
-      video: true,
-      audio: true
-    });
-
-    if (terminated) {
-      stopCamera();
-      return;
-    }
-
-    preview.srcObject = mediaStream;
-    startBtn.disabled = false;
-    statusText.textContent = "Camera ready. Click Start Recording when instructed.";
-    pageInitialized = true;
-  } catch (error) {
-    statusText.textContent = "Camera or microphone unavailable.";
-    showNotice(
-      "Camera and microphone access are required. Allow access in your browser, then reopen the recorder."
-    );
-  }
-}
-
-function startRecording() {
-  if (!pageInitialized || terminated || completed || recording) return;
-
-  if (!mediaStream) {
-    showNotice("Camera and microphone are not available.");
-    return;
-  }
+async function startRecording() {
+  if (terminated || completed || recording || !mediaStream) return;
 
   recordedChunks = [];
 
@@ -311,26 +301,24 @@ function startRecording() {
   try {
     mediaRecorder = new MediaRecorder(
       mediaStream,
-      mimeType ? { mimeType } : undefined
+      mimeType ? { mimeType: mimeType } : undefined
     );
   } catch (error) {
-    showNotice("Your browser could not start video recording.");
+    showNotice("Your browser cannot start video recording.");
     return;
   }
 
-  mediaRecorder.ondataavailable = event => {
+  mediaRecorder.ondataavailable = function(event) {
     if (event.data && event.data.size > 0) {
       recordedChunks.push(event.data);
     }
   };
 
-  mediaRecorder.onerror = () => {
-    if (!terminated && !completed) {
-      terminateInterview("A recording error occurred.");
-    }
+  mediaRecorder.onerror = function() {
+    terminateInterview("A recording error occurred.");
   };
 
-  mediaRecorder.onstop = () => {
+  mediaRecorder.onstop = function() {
     if (terminated) {
       recordedChunks = [];
       return;
@@ -342,25 +330,21 @@ function startRecording() {
 
     recordedChunks = [];
 
-    if (blob.size === 0) {
-      terminateInterview("The recording was empty.");
+    if (!blob.size) {
+      terminateInterview("The recording file was empty.");
       return;
     }
 
     completed = true;
+    recording = false;
     clearTimers();
     stopCamera();
 
     startBtn.disabled = true;
     stopBtn.disabled = true;
 
-    statusText.textContent = "Answer recorded. Sending to the interview page...";
+    statusText.textContent = "Sending recording to the official interview page...";
 
-    /*
-     * Blob is transferred to the parent using postMessage.
-     * The parent page must receive this message and upload the
-     * Blob to Drive using its existing server-side upload workflow.
-     */
     sendToParent("HRMO_VIDEO_RECORDED", {
       video: blob,
       mimeType: blob.type,
@@ -370,89 +354,98 @@ function startRecording() {
     });
 
     showNotice(
-      "Your answer has been recorded and sent to the interview page. " +
-      "Wait for confirmation before closing this window."
+      "Your answer was recorded. Wait for confirmation from the official interview page."
     );
   };
 
   try {
     mediaRecorder.start(1000);
+
     recording = true;
     recordingStartedAt = Date.now();
-    remainingSeconds = Math.max(1, Math.min(requestedSeconds, 120));
-
-    startBtn.disabled = true;
-    stopBtn.disabled = false;
-    statusText.textContent = "Recording in progress.";
+    remainingSeconds = recordingSeconds;
 
     timerText.textContent = formatTime(remainingSeconds);
+    startBtn.disabled = true;
+    stopBtn.disabled = false;
 
-    timerHandle = setInterval(() => {
+    statusText.textContent = "Recording in progress.";
+
+    timerHandle = setInterval(function() {
       if (terminated || completed) return;
 
       remainingSeconds--;
-      timerText.textContent = formatTime(Math.max(0, remainingSeconds));
+      timerText.textContent = formatTime(
+        Math.max(0, remainingSeconds)
+      );
 
       if (remainingSeconds <= 0) {
         stopRecording(true);
       }
     }, 1000);
+
   } catch (error) {
-    recording = false;
-    terminateInterview("The browser could not start recording.");
+    terminateInterview("The browser failed to start recording.");
   }
 }
 
-function stopRecording(timeLimitReached = false) {
+/* -------------------------------------------------------
+   STOP AND SUBMIT ANSWER
+------------------------------------------------------- */
+
+function stopRecording(timeLimitReached) {
   if (!recording || terminated || completed) return;
 
   recording = false;
   clearTimers();
 
   stopBtn.disabled = true;
+
   statusText.textContent = timeLimitReached
     ? "Time limit reached. Saving your answer..."
     : "Saving your answer...";
 
-  if (mediaRecorder &&
-      mediaRecorder.state !== "inactive") {
+  if (mediaRecorder && mediaRecorder.state !== "inactive") {
     mediaRecorder.stop();
   }
 }
 
-/*
- * Terminate after the recording page remains hidden for 10 seconds.
- * Short interruptions, such as a browser permission prompt, may
- * still trigger visibility changes; test this on your target browser.
- */
-document.addEventListener("visibilitychange", () => {
+/* -------------------------------------------------------
+   HIDDEN WINDOW SECURITY
+------------------------------------------------------- */
+
+document.addEventListener("visibilitychange", function() {
   if (document.hidden && recording && !completed && !terminated) {
-    visibilityHandle = setTimeout(() => {
+    hiddenHandle = setTimeout(function() {
       if (document.hidden) {
-        terminateInterview("Recording window remained hidden for 10 seconds.");
+        terminateInterview(
+          "The recording window remained hidden for 10 seconds."
+        );
       }
     }, 10000);
-  } else if (!document.hidden && visibilityHandle) {
-    clearTimeout(visibilityHandle);
-    visibilityHandle = null;
+
+  } else if (!document.hidden && hiddenHandle !== null) {
+    clearTimeout(hiddenHandle);
+    hiddenHandle = null;
   }
 });
 
-/*
- * Browser Back navigation.
- */
+/* -------------------------------------------------------
+   BROWSER BACK SECURITY
+------------------------------------------------------- */
+
 history.pushState({ hrmoRecorder: true }, "", location.href);
 
-window.addEventListener("popstate", () => {
+window.addEventListener("popstate", function() {
   terminateInterview("Browser Back navigation was detected.");
   history.pushState({ hrmoRecorder: true }, "", location.href);
 });
 
-/*
- * Messages from the parent must come from the expected origin
- * and the original opener window.
- */
-window.addEventListener("message", event => {
+/* -------------------------------------------------------
+   PARENT MESSAGES
+------------------------------------------------------- */
+
+window.addEventListener("message", function(event) {
   if (event.origin !== parentOrigin) return;
   if (event.source !== window.opener) return;
 
@@ -465,18 +458,68 @@ window.addEventListener("message", event => {
   }
 });
 
-window.addEventListener("pagehide", () => {
+window.addEventListener("pagehide", function() {
   if (recording && !completed && !terminated) {
     sendToParent("HRMO_INTERVIEW_TERMINATE", {
-      reason: "Recording page was closed or navigated away from."
+      reason: "The recording page was closed or navigated away from."
     });
 
     stopCamera();
   }
 });
 
+/* -------------------------------------------------------
+   INITIALIZE
+------------------------------------------------------- */
+
+async function initializeRecorder() {
+  const configurationError = validateConfiguration();
+
+  if (configurationError) {
+    statusText.textContent = "Verification failed.";
+    showNotice(configurationError);
+    return;
+  }
+
+  questionLabel.textContent =
+    "Question " + questionNumber + " of 6";
+
+  timerText.textContent = formatTime(recordingSeconds);
+
+  sendToParent("HRMO_RECORDER_READY", {
+    recorderOrigin: RECORDER_ORIGIN
+  });
+
+  try {
+    mediaStream = await navigator.mediaDevices.getUserMedia({
+      video: true,
+      audio: true
+    });
+
+    if (terminated) {
+      stopCamera();
+      return;
+    }
+
+    preview.srcObject = mediaStream;
+    startBtn.disabled = false;
+
+    statusText.textContent =
+      "Camera ready. Click Start Recording when instructed.";
+
+  } catch (error) {
+    statusText.textContent = "Camera or microphone unavailable.";
+
+    showNotice(
+      "Allow camera and microphone access in your browser, then reopen the recorder."
+    );
+  }
+}
+
 startBtn.addEventListener("click", startRecording);
-stopBtn.addEventListener("click", () => stopRecording(false));
+stopBtn.addEventListener("click", function() {
+  stopRecording(false);
+});
 
 initializeRecorder();
 </script>
