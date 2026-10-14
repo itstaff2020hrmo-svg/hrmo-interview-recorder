@@ -27,7 +27,7 @@ video{width:100%;max-height:360px;background:#111;border-radius:8px;margin-top:1
 (() => {
   const params = new URLSearchParams(location.search);
   const questionNumber = Number(params.get("q"));
-  const seconds = Math.min(120, Math.max(1, Number(params.get("seconds")) || 120));
+  const seconds = Math.min(180, Math.max(1, Number(params.get("seconds")) || 120));
   const suppliedParentOrigin = params.get("parentOrigin") || "";
   const allowedParentOrigins = ["https://script.google.com", "https://script.googleusercontent.com"];
   const parentOrigin = allowedParentOrigins.includes(suppliedParentOrigin) ? suppliedParentOrigin : "";
@@ -36,7 +36,7 @@ video{width:100%;max-height:360px;background:#111;border-radius:8px;margin-top:1
   let remaining = seconds, hiddenTimer = null, ended = false, notified = false;
 
   $("questionInfo").textContent = "Question " + questionNumber + " — maximum " + seconds + " seconds";
-  if (!Number.isInteger(questionNumber) || questionNumber < 1 || questionNumber > 6) {
+  if (!Number.isInteger(questionNumber) || questionNumber < 1 || questionNumber > 7) {
     $("status").textContent = "Invalid question number. Close this window and return to the interview.";
     $("startBtn").disabled = true;
   }
